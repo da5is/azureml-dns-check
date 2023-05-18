@@ -1,8 +1,9 @@
-from azure.cli.core import get_default_cli
+from azure.cli.core import get_default_cli 
 from urllib.parse import urlparse
 import argparse
 import socket
 import re
+from tabulate import tabulate
 
 def az_cli (args_str):
     args = args_str.split()
@@ -25,51 +26,59 @@ def generate_hostname(args, property, type):
         return([f'{resource_name}.vault.azure.net'])
     if type == 'sa':
         return([f'{resource_name}.blob.core.windows.net', f'{resource_name}.file.core.windows.net'])
-
+    if type == 'nb':
+        return([property])
+    if type == 'url':
+        return([urlparse(property).hostname])
+    
 def check_dns_resolution(dns_list):
+    dns_status = []
     regex = r'(?:(?:192\.)(?:(?:168\.)(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?\.)(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)))|(?:(?:10\.)(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){2}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))|(?:(?:172\.)(?:(?:1[6-9]|2[0-9]|3[0-1])\.)(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.)(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))'
     for host in dns_list:
-        ip = repr(socket.gethostbyname(host))
-        ip = ip.replace("'", "")
-        if re.match(regex, ip):
-            print(f'{host} resolves to {ip} and is PRIVATE.')
-        else:
-            print(f'{host} resolves to {ip} and is PUBLIC.')
+        try:
+            ip = repr(socket.gethostbyname(host))
+            ip = ip.replace("'", '')
+            if re.match(regex, ip):
+                dns_status += [[host, ip, 'private']]
+            else:
+                dns_status += [[host, ip, 'public']]
+        except:
+            dns_status += [[host, 'FAIL', 'FAIL']]
+    return(dns_status)
 
+def get_aml_properties(name, resourcegroup, property):
+    response = az_cli(f'resource show -n {name} -g {resourcegroup} \
+        --resource-type Microsoft.MachineLearningServices/workspaces --query properties.{property}')
+    return(response)
 
 def print_nslookup_commands(dns_list):
-    print('To check this from a workstation to validate resolution, please copy the following commands to paste into a terminal.\n')
+    print('\nTo check this from a machine without python to validate resolution, please copy the following commands to paste into a terminal.\n')
     for host in dns_list:
         print(f'nslookup {host}')
 
-dns_list = []
-parser = argparse.ArgumentParser()
-parser.add_argument('-s', '--subscription', required=True, help='The subscription GUID the AzureML Instance is in')
-parser.add_argument('-g', '--resourcegroup', required=True, help='The resource group the AzureML Instance is in')
-parser.add_argument('-n', '--name', required=True, help='The name of the AzureML Instance')
-args = parser.parse_args()
-existing_subscription = az_cli(f'account show --query id')
-az_cli(f'account set --subscription {args.subscription}')
+def main(argv):
+    dns_list = []
+    aml_properties = [
+        ('notebookInfo.fqdn', 'nb'),
+        ('discoveryUrl', 'url'),
+        ('containerRegistry', 'acr'),
+        ('keyVault', 'kv'), 
+        ('storageAccount', 'sa')
+    ]
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-s', '--subscription', required=True, help='The subscription GUID the AzureML Instance is in')
+    parser.add_argument('-g', '--resourcegroup', required=True, help='The resource group the AzureML Instance is in')
+    parser.add_argument('-n', '--name', required=True, help='The name of the AzureML Instance')
+    args = parser.parse_args()
+    existing_subscription = az_cli(f'account show --query id')
+    az_cli(f'account set --subscription {args.subscription}')
+    for property, type in aml_properties:
+        returned_property = get_aml_properties(args.name, args.resourcegroup, property)
+        dns_list += generate_hostname(args, returned_property, type)
+    print(tabulate(check_dns_resolution(dns_list), tablefmt="psql"))
+    print_nslookup_commands(dns_list)
+    az_cli(f'account set --subscription {existing_subscription}')
 
-output = az_cli(f'resource show -n {args.name} -g {args.resourcegroup} \
-    --resource-type Microsoft.MachineLearningServices/workspaces --query properties.notebookInfo.fqdn')
-dns_list = [f'{output}']
-output = az_cli(f'resource show -n {args.name} -g {args.resourcegroup} \
-    --resource-type Microsoft.MachineLearningServices/workspaces --query properties.discoveryUrl')
-dns_list += [f'{urlparse(output).hostname}']
-
-output = az_cli(f'resource show -n {args.name} -g {args.resourcegroup} \
-                --resource-type Microsoft.MachineLearningServices/workspaces --query properties.containerRegistry')
-dns_list += generate_hostname(args, output, 'acr')
-output = az_cli(f'resource show -n {args.name} -g {args.resourcegroup} \
-                --resource-type Microsoft.MachineLearningServices/workspaces --query properties.keyVault')
-dns_list += generate_hostname(args, output, 'kv')
-output = az_cli(f'resource show -n {args.name} -g {args.resourcegroup} \
-                --resource-type Microsoft.MachineLearningServices/workspaces --query properties.storageAccount')
-dns_list += generate_hostname(args, output, 'sa')
-print('------------')
-check_dns_resolution(dns_list)
-print('------------')
-print_nslookup_commands(dns_list)
-az_cli(f'account set --subscription {existing_subscription}')
-
+if __name__ == '__main__':
+    import sys
+    main(sys.argv)
